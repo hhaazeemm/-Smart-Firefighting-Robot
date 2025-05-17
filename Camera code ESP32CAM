@@ -1,0 +1,785 @@
+
+#include "esp_camera.h"
+#include <Arduino.h>
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <iostream>
+#include <sstream>
+#include <ESP32Servo.h>
+#include <HardwareSerial.h>
+#include <ArduinoJson.h>
+
+#define PAN_PIN 14
+#define TILT_PIN 15
+
+Servo panServo;
+Servo tiltServo;
+
+HardwareSerial mySerial(2);  // Use Serial2
+
+struct MOTOR_PINS {
+  int pinEn;
+  int pinIN1;
+  int pinIN2;
+};
+
+unsigned long previousMillis = 0;     // Tracks the last time the code ran
+const unsigned long interval = 5000;  // Interval in milliseconds (1 second)
+
+
+std::vector<MOTOR_PINS> motorPins = {
+  { 3, 14, 2 },   //RIGHT_MOTOR Pins (EnA, IN1, IN2)
+  { 3, 13, 15 },  //LEFT_MOTOR  Pins (EnB, IN3, IN4)
+};
+#define LIGHT_PIN 4
+
+#define UP 1
+#define DOWN 2
+#define LEFT 4
+#define RIGHT 3
+#define STOP 0
+
+#define RIGHT_MOTOR 0
+#define LEFT_MOTOR 1
+
+#define FORWARD 1
+#define BACKWARD -1
+
+const int PWMFreq = 1000; /* 1 KHz */
+const int PWMResolution = 8;
+const int PWMLightChannel = 3;
+
+//Camera related constants
+#define PWDN_GPIO_NUM 32
+#define RESET_GPIO_NUM -1
+#define XCLK_GPIO_NUM 0
+#define SIOD_GPIO_NUM 26
+#define SIOC_GPIO_NUM 27
+#define Y9_GPIO_NUM 35
+#define Y8_GPIO_NUM 34
+#define Y7_GPIO_NUM 39
+#define Y6_GPIO_NUM 36
+#define Y5_GPIO_NUM 21
+#define Y4_GPIO_NUM 19
+#define Y3_GPIO_NUM 18
+#define Y2_GPIO_NUM 5
+#define VSYNC_GPIO_NUM 25
+#define HREF_GPIO_NUM 23
+#define PCLK_GPIO_NUM 22
+
+const char *ssid = "CAR";
+const char *password = "123454321";
+
+AsyncWebServer server(80);
+AsyncWebSocket wsCamera("/Camera");
+AsyncWebSocket wsCarInput("/CarInput");
+uint32_t cameraClientId = 0;
+
+int soundSensor = 0;
+int temperatureSensor = 0;
+int gasSensor = 0;
+
+const char *htmlHomePage PROGMEM = R"HTMLHOMEPAGE(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <title>Car Control Panel</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f9f9f9;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 500px;
+            margin: 20px auto;
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+            padding: 20px;
+        }
+
+        .response {
+            background: #f4f4f4;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            max-height: 150px;
+            overflow-y: auto;
+            margin-bottom: 20px;
+            text-align: left;
+            font-size: 14px;
+            color: #333;
+        }
+
+        #cameraImage {
+            width: 100%;
+            height: auto;
+            transform: rotate(180deg);
+            border-radius: 8px;
+        }
+
+        table {
+            width: 100%;
+            margin: 20px 0;
+            table-layout: fixed;
+            text-align: center;
+        }
+
+        td.button {
+            background-color: #333;
+            color: #fff;
+            font-size: 24px;
+            border-radius: 50%;
+            padding: 20px;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            box-shadow: 3px 3px 10px rgba(0, 0, 0, 0.3);
+        }
+
+        td.button:hover {
+            background-color: #444;
+        }
+
+        td.button:active {
+            transform: scale(0.95);
+            box-shadow: none;
+        }
+
+        .slider-container {
+            display: flex;
+            flex-direction: column;
+            margin-bottom: 15px;
+        }
+
+        .slider-container label {
+            margin-bottom: 5px;
+            font-size: 16px;
+            color: #333;
+        }
+
+        .slider {
+            -webkit-appearance: none;
+            width: 100%;
+            height: 15px;
+            border-radius: 5px;
+            background: #d3d3d3;
+            outline: none;
+            transition: opacity 0.2s;
+            cursor: pointer;
+        }
+
+        .slider:hover {
+            opacity: 0.9;
+        }
+
+        .slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 25px;
+            height: 25px;
+            border-radius: 50%;
+            background: #ff5722;
+            cursor: pointer;
+        }
+
+        .slider::-moz-range-thumb {
+            width: 25px;
+            height: 25px;
+            border-radius: 50%;
+            background: #ff5722;
+            cursor: pointer;
+        }
+
+        marquee {
+            margin-top: 10px;
+            color: #666;
+            font-size: 14px;
+        }
+
+        /* Container for the toggle */
+        .toggle-container {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-family: Arial, sans-serif;
+        }
+
+        /* Toggle switch styling */
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 50px;
+            height: 24px;
+        }
+
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+
+        /* The slider (renamed to toggle-slider) */
+        .toggle-slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: 0.4s;
+            border-radius: 24px;
+        }
+
+        .toggle-slider::before {
+            position: absolute;
+            content: "";
+            height: 18px;
+            width: 18px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: 0.4s;
+            border-radius: 50%;
+        }
+
+        /* When checked */
+        input:checked+.toggle-slider {
+            background-color: #4caf50;
+        }
+
+        input:checked+.toggle-slider::before {
+            transform: translateX(26px);
+        }
+
+        /* Label for mode */
+        #modeLabel {
+            font-size: 16px;
+            color: #333;
+            margin: 0;
+        }
+
+        .sensor-readings {
+            margin: 20px 0;
+            padding: 10px;
+            background-color: #f4f4f4;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            text-align: left;
+        }
+
+        .sensor {
+            margin-bottom: 10px;
+            font-size: 16px;
+            color: #333;
+        }
+
+        .sensor label {
+            font-weight: bold;
+        }
+
+        .manual-only-container {
+            text-align: center;
+            margin-top: 20px;
+        }
+
+        .manual-button {
+            background-color: #007BFF;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            font-size: 16px;
+            border-radius: 5px;
+            cursor: pointer;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+            transition: background-color 0.3s, box-shadow 0.3s;
+        }
+
+        .manual-button:hover {
+            background-color: #0056b3;
+        }
+
+        .manual-button:disabled {
+            background-color: #cccccc;
+            color: #666666;
+            cursor: not-allowed;
+            box-shadow: none;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div class="toggle-container">
+            <label class="switch">
+                <input type="checkbox" id="autoToggle" value="false" onclick="toggleMode(this)">
+                <span class="toggle-slider round"></span>
+            </label>
+            <p id="modeLabel">Manual Mode</p>
+        </div>
+
+        <img id="cameraImage" alt="Video Stream">
+
+
+        <!-- Sensor Readings Section -->
+        <div class="sensor-readings">
+            <div class="sensor">
+                <label>Humidity Sensor:</label>
+                <span id="soundSensorValue">0</span> %
+            </div>
+            <div class="sensor">
+                <label>Temperature Sensor:</label>
+                <span id="temperatureSensorValue">0</span> °C
+            </div>
+            <div class="sensor">
+                <label>Gas Sensor:</label>
+                <span id="gasSensorValue">0</span> ppm
+            </div>
+        </div>
+
+
+        <table cellspacing="10">
+            <tr>
+                <td></td>
+                <td class="button" onmousedown='sendButtonInput("MoveCar","1")'
+                    onmouseup='sendButtonInput("MoveCar","0")'>
+                    &#8679;
+                </td>
+                <td></td>
+            </tr>
+            <tr>
+                <td class="button" onmousedown='sendButtonInput("MoveCar","3")'
+                    onmouseup='sendButtonInput("MoveCar","0")'>
+                    &#8678;
+                </td>
+                <td></td>
+                <td class="button" onmousedown='sendButtonInput("MoveCar","4")'
+                    onmouseup='sendButtonInput("MoveCar","0")'>
+                    &#8680;
+                </td>
+            </tr>
+            <tr>
+                <td></td>
+                <td class="button" onmousedown='sendButtonInput("MoveCar","2")'
+                    onmouseup='sendButtonInput("MoveCar","0")'>
+                    &#8681;
+                </td>
+                <td></td>
+            </tr>
+        </table>
+        <div class="slider-container">
+            <label for="Light">Light:</label>
+            <input type="range" min="0" max="255" value="0" class="slider" id="Light"
+                oninput='sendButtonInput("Light",value)'>
+        </div>
+        <!-- New Button -->
+        <div class="manual-only-container">
+            <button id="manualButton" class="manual-button" disabled onclick="manualButtonAction()">
+                ACTIVATE
+            </button>
+        </div>
+
+        <marquee>Hazem A. Alsmadi</marquee>
+        <marquee>Faisal M. Altarazi</marquee>
+    </div>
+
+    <script>
+        var webSocketCameraUrl = "ws:\/\/" + window.location.hostname + "/Camera";
+        var webSocketCarInputUrl = "ws:\/\/" + window.location.hostname + "/CarInput";
+        var websocketCamera;
+        var websocketCarInput;
+        var intervalId = -1; // Variable to store the interval ID
+        const baseUrl = `http://${window.location.hostname}`;
+
+
+        function initCameraWebSocket() {
+            websocketCamera = new WebSocket(webSocketCameraUrl);
+            websocketCamera.binaryType = 'blob';
+            websocketCamera.onopen = function (event) { };
+            websocketCamera.onclose = function (event) { setTimeout(initCameraWebSocket, 2000); };
+            websocketCamera.onmessage = function (event) {
+                var imageId = document.getElementById("cameraImage");
+                imageId.src = URL.createObjectURL(event.data);
+            };
+        }
+
+        function initCarInputWebSocket() {
+            websocketCarInput = new WebSocket(webSocketCarInputUrl);
+            websocketCarInput.onopen = function (event) {
+                sendButtonInput("Light", document.getElementById("Light").value);
+            };
+            websocketCarInput.onclose = function (event) { setTimeout(initCarInputWebSocket, 2000); };
+            websocketCarInput.onmessage = function (event) { };
+        }
+
+        function initWebSocket() {
+            initCameraWebSocket();
+            initCarInputWebSocket();
+        }
+
+        function sendButtonInput(key, value) {
+            var data = key + "," + value;
+            websocketCarInput.send(data);
+        }
+
+        window.onload = initWebSocket;
+        // document.getElementById("mainTable").addEventListener("touchend", function (event) {
+        //     event.preventDefault()
+        // });
+        // Detect Fire
+
+        function toggleMode(toggle) {
+            const modeLabel = document.getElementById("modeLabel");
+            const manualButton = document.getElementById("manualButton");
+
+            if (toggle.checked) {
+                sendButtonInput("MODE", "AUTO"); // Enable automatic mode
+                modeLabel.innerHTML = "Automatic Mode";
+                manualButton.disabled = true; // Disable button in automatic mode
+
+            } else {
+                sendButtonInput("MODE", "MANUAL"); // Enable manual mode
+                modeLabel.innerHTML = "Manual Mode";
+                manualButton.disabled = false; // Enable button in manual mode
+            }
+        }
+
+        function manualButtonAction() {
+            const manualButton = document.getElementById("manualButton");
+
+            if (manualButton.textContent === "ACTIVATE") {
+                manualButton.textContent = "DEACTIVATE";
+                sendButtonInput("ACTIVATE", "1");
+            } else {
+                manualButton.textContent = "ACTIVATE";
+                sendButtonInput("ACTIVATE", "0");
+            }
+        }
+    </script>
+</body>
+</html>
+)HTMLHOMEPAGE";
+
+
+void sendCommandToArduino(const String &command) {
+  mySerial.println(command);  // Send command to Arduino
+}
+
+void rotateMotor(int motorNumber, int motorDirection) {
+  if (motorDirection == FORWARD) {
+    digitalWrite(motorPins[motorNumber].pinIN1, LOW);
+    digitalWrite(motorPins[motorNumber].pinIN2, HIGH);
+  } else if (motorDirection == BACKWARD) {
+    digitalWrite(motorPins[motorNumber].pinIN1, HIGH);
+    digitalWrite(motorPins[motorNumber].pinIN2, LOW);
+  } else {
+    digitalWrite(motorPins[motorNumber].pinIN1, LOW);
+    digitalWrite(motorPins[motorNumber].pinIN2, LOW);
+  }
+}
+
+void moveCar(int inputValue) {
+  Serial.printf("Got value as %d\n", inputValue);
+  switch (inputValue) {
+
+    case UP:
+      sendCommandToArduino("MOVE:FORWARD");
+
+      rotateMotor(RIGHT_MOTOR, FORWARD);
+      rotateMotor(LEFT_MOTOR, FORWARD);
+      break;
+
+    case DOWN:
+      rotateMotor(RIGHT_MOTOR, BACKWARD);
+      rotateMotor(LEFT_MOTOR, BACKWARD);
+      sendCommandToArduino("MOVE:BACKWARD");
+
+      break;
+
+    case LEFT:
+      rotateMotor(RIGHT_MOTOR, FORWARD);
+      rotateMotor(LEFT_MOTOR, BACKWARD);
+      sendCommandToArduino("MOVE:LEFT");
+
+      break;
+
+    case RIGHT:
+      rotateMotor(RIGHT_MOTOR, BACKWARD);
+      rotateMotor(LEFT_MOTOR, FORWARD);
+      sendCommandToArduino("MOVE:RIGHT");
+
+      break;
+
+    case STOP:
+      rotateMotor(RIGHT_MOTOR, STOP);
+      rotateMotor(LEFT_MOTOR, STOP);
+      sendCommandToArduino("STOP");
+      break;
+
+    default:
+      rotateMotor(RIGHT_MOTOR, STOP);
+      rotateMotor(LEFT_MOTOR, STOP);
+      sendCommandToArduino("STOP");
+      break;
+  }
+}
+
+void handleRoot(AsyncWebServerRequest *request) {
+  request->send_P(200, "text/html", htmlHomePage);
+}
+
+void handleNotFound(AsyncWebServerRequest *request) {
+  request->send(404, "text/plain", "File Not Found");
+}
+
+void onCarInputWebSocketEvent(AsyncWebSocket *server,
+                              AsyncWebSocketClient *client,
+                              AwsEventType type,
+                              void *arg,
+                              uint8_t *data,
+                              size_t len) {
+  switch (type) {
+    case WS_EVT_CONNECT:
+      Serial.printf("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
+      break;
+    case WS_EVT_DISCONNECT:
+      Serial.printf("WebSocket client #%u disconnected\n", client->id());
+      moveCar(0);
+      ledcWrite(PWMLightChannel, 0);
+      panServo.write(90);
+      tiltServo.write(90);
+      break;
+    case WS_EVT_DATA:
+      AwsFrameInfo *info;
+      info = (AwsFrameInfo *)arg;
+      if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
+        std::string myData = "";
+        myData.assign((char *)data, len);
+        std::istringstream ss(myData);
+        std::string key, value;
+        std::getline(ss, key, ',');
+        std::getline(ss, value, ',');
+        Serial.printf("Key [%s] Value[%s]\n", key.c_str(), value.c_str());
+        int valueInt = atoi(value.c_str());
+        if (key == "MoveCar") {
+          moveCar(valueInt);
+        } else if (key == "Light") {
+          ledcWrite(PWMLightChannel, valueInt);
+        } else if (key == "Pan") {
+          panServo.write(valueInt);
+        } else if (key == "Tilt") {
+          tiltServo.write(valueInt);
+        } else if (key == "MODE") {
+          if (value == "AUTO")
+            sendCommandToArduino("MODE:AUTO");
+          else if (value == "MANUAL")
+            sendCommandToArduino("MODE:MANUAL");
+          else if (value == "AI") sendCommandToArduino("MODE:AI");
+          else if (value == "NOAI") sendCommandToArduino("MODE:NOAI");
+        } else if (key == "ACTIVATE") {
+          if (value == "1") sendCommandToArduino("MODE:ACTIVATE");
+          else sendCommandToArduino("MODE:DEACTIVATE");
+        }
+      }
+      break;
+    case WS_EVT_PONG:
+    case WS_EVT_ERROR:
+      break;
+    default:
+      break;
+  }
+}
+
+void onCameraWebSocketEvent(AsyncWebSocket *server,
+                            AsyncWebSocketClient *client,
+                            AwsEventType type,
+                            void *arg,
+                            uint8_t *data,
+                            size_t len) {
+  switch (type) {
+    case WS_EVT_CONNECT:
+      Serial.printf("WebSocket client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
+      cameraClientId = client->id();
+      break;
+    case WS_EVT_DISCONNECT:
+      Serial.printf("WebSocket client #%u disconnected\n", client->id());
+      cameraClientId = 0;
+      break;
+    case WS_EVT_DATA:
+      break;
+    case WS_EVT_PONG:
+    case WS_EVT_ERROR:
+      break;
+    default:
+      break;
+  }
+}
+
+
+void setupCamera() {
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_4;
+  config.ledc_timer = LEDC_TIMER_2;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sscb_sda = SIOD_GPIO_NUM;
+  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+  config.pixel_format = PIXFORMAT_JPEG;
+
+  config.frame_size = FRAMESIZE_VGA;
+  config.jpeg_quality = 10;
+  config.fb_count = 1;
+
+  // camera init
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Camera init failed with error 0x%x", err);
+    return;
+  }
+
+  if (psramFound()) {
+    heap_caps_malloc_extmem_enable(20000);
+    Serial.printf("PSRAM initialized. malloc to take memory from psram above this size");
+  }
+}
+
+void sendCameraPicture() {
+  if (cameraClientId == 0)
+    return;
+  //capture a frame
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("Frame buffer could not be acquired");
+    return;
+  }
+
+  unsigned long startTime2 = millis();
+  wsCamera.binary(cameraClientId, fb->buf, fb->len);
+  esp_camera_fb_return(fb);
+
+  //Wait for message to be delivered
+  while (true) {
+    AsyncWebSocketClient *clientPointer = wsCamera.client(cameraClientId);
+    if (!clientPointer || !(clientPointer->queueIsFull())) {
+      break;
+    }
+    delay(1);
+  }
+}
+
+void setUpPinModes() {
+  panServo.attach(PAN_PIN);
+  tiltServo.attach(TILT_PIN);
+
+  //Set up PWM
+  ledcSetup(PWMLightChannel, PWMFreq, PWMResolution);
+
+  for (int i = 0; i < motorPins.size(); i++) {
+    pinMode(motorPins[i].pinEn, OUTPUT);
+    pinMode(motorPins[i].pinIN1, OUTPUT);
+    pinMode(motorPins[i].pinIN2, OUTPUT);
+  }
+  moveCar(STOP);
+
+  pinMode(LIGHT_PIN, OUTPUT);
+  ledcAttachPin(LIGHT_PIN, PWMLightChannel);
+}
+
+
+void parseData(String data) {
+  int sensor1 = data.substring(0, data.indexOf('-')).toInt();  // Extract first value
+  data = data.substring(data.indexOf('-') + 1);
+
+  int gas = data.substring(0, data.indexOf('-')).toInt();       // Extract second value
+  float hum = data.substring(data.indexOf('-') + 1).toFloat();  // Extract third value
+
+
+  soundSensor = hum;
+  temperatureSensor = sensor1;
+  gasSensor = gas;
+}
+
+// Function to simulate sensor updates
+void updateSensorData() {
+  if (mySerial.available()) {
+    parseData(mySerial.readStringUntil('\n'));
+  }
+}
+
+void setup(void) {
+
+  setUpPinModes();
+  Serial.begin(115200);
+  mySerial.begin(9600, SERIAL_8N1, 14, 15);  // TX=GPIO14, RX=GPIO15
+
+  // Start the ESP32 as an Access Point
+  WiFi.softAP(ssid, password);
+
+  // Print the IP address of the AP
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("AP IP address: ");
+  Serial.println(IP);
+
+  // WiFi.begin(ssid, password);
+  // // Wait until the ESP connects to Wi-Fi
+  // while (WiFi.status() != WL_CONNECTED) {
+  //   delay(1000);
+  //   Serial.println("Connecting...");
+  // }
+
+
+  // IPAddress IP = WiFi.localIP();
+  // Serial.print("AP IP address: ");
+  // Serial.println(IP);
+
+  server.on("/", HTTP_GET, handleRoot);
+  // server.on("/mjpeg", HTTP_GET, handleMJPEGStream);
+
+
+  server.onNotFound(handleNotFound);
+
+  wsCamera.onEvent(onCameraWebSocketEvent);
+  server.addHandler(&wsCamera);
+
+  wsCarInput.onEvent(onCarInputWebSocketEvent);
+  server.addHandler(&wsCarInput);
+
+  server.begin();
+  Serial.println("HTTP server started");
+
+  setupCamera();
+}
+
+
+
+
+void loop() {
+  wsCamera.cleanupClients();
+  wsCarInput.cleanupClients();
+  sendCameraPicture();
+}
