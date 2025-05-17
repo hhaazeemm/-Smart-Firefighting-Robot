@@ -13,7 +13,7 @@ The robot explores hazardous areas, extinguishes fires, and detects trapped indi
 
 ## Components
 - ESP32-CAM
-- Arduino Nano
+- Arduino MEGA
 - Flame Sensor
 - Gas Sensor (MQ-2 or similar)
 - Ultrasonic Sensor
